@@ -1,20 +1,5 @@
 # -*- coding: utf-8 -*-
 
-"""
-VIIRS query - QGIS Processing Script
-
-Queries monthly VIIRS raster datasets hosted on Ellipsis Drive via REST API.
-
-- Mandatory selection of input features (max 5)
-- Monthly time range selection (year/month)
-- Automatic CRS transform to EPSG:4326
-- Automatic batching of timestampIds (max 50 per request)
-- Output is a table (no geometry)
-  - Points: pixel_value
-  - Lines/Polygons: min/max/mean/median/deviation/sum
-- Numeric outputs rounded to 2 decimals
-"""
-
 import json
 import requests
 
@@ -24,6 +9,7 @@ from qgis.core import (
     QgsProcessingParameterEnum,
     QgsProcessingParameterVectorLayer,
     QgsProcessingParameterField,
+    QgsProcessingParameterString,
     QgsProcessingParameterFeatureSink,
     QgsProcessing,
     QgsProcessingException,
@@ -40,9 +26,10 @@ from qgis.core import (
 
 
 class VIIRSQuery(QgsProcessingAlgorithm):
+
     P_DATASET = "DATASET"
     P_INPUT_LAYER = "INPUT_LAYER"
-    P_ID_FIELD = "ID_FIELD"  # optional
+    P_ID_FIELD = "ID_FIELD"
 
     P_START_YEAR = "START_YEAR"
     P_START_MONTH = "START_MONTH"
@@ -62,9 +49,6 @@ class VIIRSQuery(QgsProcessingAlgorithm):
         "EVI":  "e933ceba-c12e-4e1f-8171-2c02706cea5f",
     }
 
-    # ----------------------
-    # Metadata
-    # ----------------------
     def tr(self, s):
         return QCoreApplication.translate("VIIRSQuery", s)
 
@@ -85,28 +69,41 @@ class VIIRSQuery(QgsProcessingAlgorithm):
 
     def shortHelpString(self):
         return self.tr(
-            "Extract monthly VIIRS values (NDVI/EVI/LST) from Ellipsis Drive.\n\n"
-            "How to use:\n"
-            "1) Choose the VIIRS dataset.\n"
-            "2) Select 1–5 features in the input layer (points/lines/polygons).\n"
-            "3) Set the time range (year/month).\n\n"
-            "Constraints:\n"
-            "- Feature selection is mandatory; the tool will not process all layer features.\n"
-            "- Max 5 selected features to limit the number of API requests.\n"
-            "- API limitation: max 50 timestamps per request; batching is automatic.\n\n"
+            "Questo strumento estrae valori mensili VIIRS (es. NDVI/EVI/LST) dal dataset su Ellipsis Drive.\n\n"
+            "Come usarlo:\n"
+            "1) Scegli il dataset VIIRS.\n"
+            "2) Seleziona nel layer di input 1–5 feature (punti/linee/poligoni).\n"
+            "3) Imposta il periodo (mese/anno).\n\n"
+            "Vincoli:\n"
+            "- È obbligatorio selezionare le feature: il tool NON elabora tutte le feature del layer.\n"
+            "- Massimo 5 feature selezionate per evitare troppe richieste.\n"
+            "- Se il periodo include molti mesi, il tool effettua più richieste (massimo 50 mesi per richiesta).\n\n"
             "Output:\n"
-            "- Points: pixel_value.\n"
-            "- Lines/polygons: raster statistics.\n"
+            "- Per punti: un valore per ogni timestamp (pixel_value).\n"
+            "- Per linee/poligoni: statistiche (min/max/mean/...).\n"
         )
 
-    # ----------------------
+    # --------------------------
     # Parameters
-    # ----------------------
+    # --------------------------
+
     def initAlgorithm(self, config=None):
+
+        info_text = (
+            "📌 VIIRS query\n"
+            "Estrae valori mensili VIIRS (NDVI/EVI/LST) per le feature selezionate.\n\n"
+            "✅ Cosa devi fare:\n"
+            "• Seleziona 1–5 feature nel layer (punti/linee/poligoni)\n"
+            "• Scegli dataset e periodo (mese/anno)\n\n"
+            "⚠️ Vincoli:\n"
+            f"• Massimo {self.MAX_SELECTED} feature selezionate\n"
+            f"• Massimo {self.MAX_TIMESTAMPS_PER_REQUEST} timestamp per singola richiesta (il tool spezza automaticamente)\n"
+        )
+
         self.addParameter(
             QgsProcessingParameterEnum(
                 self.P_DATASET,
-                self.tr("VIIRS dataset"),
+                "Seleziona dataset VIIRS",
                 options=list(self.DATASETS.keys()),
                 defaultValue=0,
             )
@@ -115,7 +112,7 @@ class VIIRSQuery(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterVectorLayer(
                 self.P_INPUT_LAYER,
-                self.tr("Input layer (select 1–5 features)"),
+                "Layer geometrie (seleziona 1–5 feature)",
                 types=[
                     QgsProcessing.TypeVectorPoint,
                     QgsProcessing.TypeVectorLine,
@@ -127,7 +124,7 @@ class VIIRSQuery(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterField(
                 self.P_ID_FIELD,
-                self.tr("Optional ID field (for joins)"),
+                "Campo ID del layer (opzionale, per join)",
                 parentLayerParameterName=self.P_INPUT_LAYER,
                 optional=True,
             )
@@ -137,28 +134,29 @@ class VIIRSQuery(QgsProcessingAlgorithm):
         years = [str(y) for y in range(self.FIRST_YEAR, current_year + 1)]
         months = [f"{m:02d}" for m in range(1, 13)]
 
-        self.addParameter(QgsProcessingParameterEnum(self.P_START_YEAR, self.tr("Start year"), years, defaultValue=0))
-        self.addParameter(QgsProcessingParameterEnum(self.P_START_MONTH, self.tr("Start month"), months, defaultValue=0))
-        self.addParameter(QgsProcessingParameterEnum(self.P_END_YEAR, self.tr("End year"), years, defaultValue=len(years) - 1))
+        self.addParameter(QgsProcessingParameterEnum(self.P_START_YEAR, "Anno inizio", years, defaultValue=0))
+        self.addParameter(QgsProcessingParameterEnum(self.P_START_MONTH, "Mese inizio", months, defaultValue=0))
+        self.addParameter(QgsProcessingParameterEnum(self.P_END_YEAR, "Anno fine", years, defaultValue=len(years) - 1))
         self.addParameter(
             QgsProcessingParameterEnum(
                 self.P_END_MONTH,
-                self.tr("End month"),
+                "Mese fine",
                 months,
-                defaultValue=QDate.currentDate().month() - 1,  # 0-based
+                defaultValue=QDate.currentDate().month() - 1
             )
         )
 
         self.addParameter(
             QgsProcessingParameterFeatureSink(
                 self.P_OUTPUT,
-                self.tr("Output table"),
+                "Output"
             )
         )
 
-    # ----------------------
+    # --------------------------
     # Helpers
-    # ----------------------
+    # --------------------------
+
     @staticmethod
     def _chunk_list(lst, size):
         for i in range(0, len(lst), size):
@@ -174,49 +172,48 @@ class VIIRSQuery(QgsProcessingAlgorithm):
             return None
 
     @staticmethod
-    def _yyyymm_from_iso(iso_str: str) -> int:
+    def _yyyymm_from_iso(iso_str):
         if not iso_str or len(iso_str) < 7:
             return -1
         try:
-            y = int(iso_str[0:4])
-            m = int(iso_str[5:7])
-            return y * 100 + m
+            return int(iso_str[0:4]) * 100 + int(iso_str[5:7])
         except Exception:
             return -1
 
     @staticmethod
-    def _date_only(iso_str: str) -> str:
+    def _date_only(iso_str):
         if not iso_str:
             return ""
         s = str(iso_str)
         return s[:10] if len(s) >= 10 else s
 
     @staticmethod
-    def _pixel_value_from_statistics(stats: dict):
-        """For point inputs: prefer histogram[0].bin, fallback to mean."""
+    def _pixel_value_from_statistics(stats):
         if not stats:
             return None
         hist = stats.get("histogram")
         if isinstance(hist, list) and hist:
-            first = hist[0] or {}
-            if isinstance(first, dict) and first.get("bin") is not None:
-                return first.get("bin")
+            bin_val = hist[0].get("bin")
+            if bin_val is not None:
+                return bin_val
         return stats.get("mean")
 
-    # ----------------------
+    # --------------------------
     # Main
-    # ----------------------
+    # --------------------------
+
     def processAlgorithm(self, parameters, context, feedback):
+
         vlayer = self.parameterAsVectorLayer(parameters, self.P_INPUT_LAYER, context)
         if vlayer is None:
-            raise QgsProcessingException(self.tr("Invalid input layer."))
+            raise QgsProcessingException("Layer non valido")
 
         selected = list(vlayer.getSelectedFeatures())
         if len(selected) == 0:
-            raise QgsProcessingException(self.tr("Select at least 1 feature in the input layer before running the tool."))
+            raise QgsProcessingException("Seleziona almeno 1 feature nel layer prima di eseguire il tool.")
         if len(selected) > self.MAX_SELECTED:
             raise QgsProcessingException(
-                self.tr(f"Too many selected features ({len(selected)}). Max allowed: {self.MAX_SELECTED}.")
+                f"Hai selezionato {len(selected)} feature: oltre il limite massimo di {self.MAX_SELECTED}."
             )
 
         id_field = (self.parameterAsString(parameters, self.P_ID_FIELD, context) or "").strip()
@@ -226,7 +223,7 @@ class VIIRSQuery(QgsProcessingAlgorithm):
         dataset_name = list(self.DATASETS.keys())[dataset_index]
         dataset_id = self.DATASETS[dataset_name]
 
-        # --- time range
+        # --- Time filtering
         current_year = QDate.currentDate().year()
         years = [str(y) for y in range(self.FIRST_YEAR, current_year + 1)]
         months = [f"{m:02d}" for m in range(1, 13)]
@@ -239,29 +236,26 @@ class VIIRSQuery(QgsProcessingAlgorithm):
         start_key = sy * 100 + sm
         end_key = ey * 100 + em
         if start_key > end_key:
-            raise QgsProcessingException(self.tr("Invalid time range: start is after end."))
+            raise QgsProcessingException("Periodo non valido: la data di inizio è successiva alla data di fine.")
 
-        # --- timestamps list
-        path_url = f"https://api.ellipsis-drive.com/v3/path/{dataset_id}"
-        r = requests.get(path_url, timeout=60)
+        # --- Get timestamps
+        url = f"https://api.ellipsis-drive.com/v3/path/{dataset_id}"
+        r = requests.get(url, timeout=60)
         if r.status_code != 200:
-            raise QgsProcessingException(self.tr(f"Timestamp request failed (HTTP {r.status_code})."))
+            raise QgsProcessingException(f"Errore nel recupero dei timestamp (HTTP {r.status_code}).")
 
         data = r.json()
         timestamps = (data.get("raster") or {}).get("timestamps") or []
-        if not isinstance(timestamps, list) or not timestamps:
-            raise QgsProcessingException(self.tr("No timestamps found in API response."))
 
         ts_info = {}
         ts_ids = []
+
         for ts in timestamps:
             ts_id = ts.get("id")
-            date_node = ts.get("date") or {}
-            date_from_iso = str(date_node.get("from") or "")
-            date_to_iso = str(date_node.get("to") or "")
-            desc = str(ts.get("description") or "")
+            date_from = str((ts.get("date") or {}).get("from") or "")
+            date_to = str((ts.get("date") or {}).get("to") or "")
 
-            key = self._yyyymm_from_iso(date_from_iso)
+            key = self._yyyymm_from_iso(date_from)
             if key == -1 or ts_id is None:
                 continue
 
@@ -269,15 +263,15 @@ class VIIRSQuery(QgsProcessingAlgorithm):
                 ts_id = str(ts_id)
                 ts_ids.append(ts_id)
                 ts_info[ts_id] = {
-                    "date_from": self._date_only(date_from_iso),
-                    "date_to": self._date_only(date_to_iso),
-                    "description": desc,
+                    "date_from": self._date_only(date_from),
+                    "date_to": self._date_only(date_to),
+                    "description": ts.get("description") or ""
                 }
 
         if not ts_ids:
-            raise QgsProcessingException(self.tr("No timestamps available in the selected time range."))
+            raise QgsProcessingException("Nessun timestamp disponibile nel periodo selezionato.")
 
-        # --- output schema
+        # --- Output schema
         fields = QgsFields()
         fields.append(QgsField("input_fid", QVariant.LongLong))
         fields.append(QgsField("input_id", QVariant.String))
@@ -304,9 +298,10 @@ class VIIRSQuery(QgsProcessingAlgorithm):
             context,
             fields,
             QgsWkbTypes.NoGeometry,
-            QgsCoordinateReferenceSystem(),
+            QgsCoordinateReferenceSystem()
         )
 
+        # --- Analyse with batching
         analyse_url = f"https://api.ellipsis-drive.com/v3/path/{dataset_id}/raster/timestamp/analyse"
         batches = list(self._chunk_list(ts_ids, self.MAX_TIMESTAMPS_PER_REQUEST))
 
@@ -316,68 +311,51 @@ class VIIRSQuery(QgsProcessingAlgorithm):
             transform = QgsCoordinateTransform(
                 vlayer.crs(),
                 QgsCoordinateReferenceSystem("EPSG:4326"),
-                QgsProject.instance(),
+                QgsProject.instance()
             )
         else:
             transform = None
 
-        # --- process features
         for f in selected:
+
             input_fid = f.id()
-            input_id_value = ""
-            if id_field:
-                raw = f.attribute(id_field)
-                input_id_value = "" if raw is None else str(raw)
+            input_id_value = str(f.attribute(id_field)) if id_field else ""
 
             geom = QgsGeometry(f.geometry())
-            if geom is None or geom.isEmpty():
+            if geom.isEmpty():
                 continue
-
-            # If geometry is curved, best-effort segmentize via abstract geometry (compat-safe)
-            if QgsWkbTypes.isCurvedType(geom.wkbType()):
-                try:
-                    abs_g = geom.constGet()
-                    if hasattr(abs_g, "segmentize"):
-                        geom = QgsGeometry(abs_g.segmentize())
-                except Exception:
-                    pass
 
             if transform is not None:
                 geom.transform(transform)
 
-            geometry_param = geom.asJson()  # GeoJSON geometry string
+            geometry_param = geom.asJson()  # GeoJSON geometry
 
             for batch in batches:
+
                 params = {
                     "timestampIds": json.dumps(batch),
                     "geometry": geometry_param,
-                    "returnType": "statistics",
+                    "returnType": "statistics"
                 }
 
                 rr = requests.get(analyse_url, params=params, timeout=180)
                 if rr.status_code != 200:
                     raise QgsProcessingException(
-                        self.tr(f"Analyse request failed (HTTP {rr.status_code}): {(rr.text or '')[:200]}")
+                        f"Errore analyse (HTTP {rr.status_code}): {(rr.text or '')[:200]}"
                     )
 
                 analysed = rr.json()
-                if not isinstance(analysed, list):
-                    raise QgsProcessingException(self.tr("Unexpected analyse response (expected a JSON list)."))
 
                 for item in analysed:
+
                     ts_id = str((item.get("timestamp") or {}).get("id") or "")
                     has_data = 1 if item.get("hasData") else 0
-
                     info = ts_info.get(ts_id, {})
-                    desc = info.get("description", "")
-                    date_from = info.get("date_from", "")
-                    date_to = info.get("date_to", "")
-
-                    # band 1 only
                     stats = None
+
                     for res in item.get("result") or []:
                         if (res.get("band") or {}).get("number") == 1:
-                            stats = res.get("statistics") or {}
+                            stats = res.get("statistics")
                             break
 
                     base_attrs = [
@@ -385,10 +363,10 @@ class VIIRSQuery(QgsProcessingAlgorithm):
                         input_id_value,
                         dataset_name,
                         ts_id,
-                        date_from,
-                        date_to,
-                        desc,
-                        has_data,
+                        info.get("date_from", ""),
+                        info.get("date_to", ""),
+                        info.get("description", ""),
+                        has_data
                     ]
 
                     out_f = QgsFeature(fields)

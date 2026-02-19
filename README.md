@@ -12,6 +12,8 @@ The tool extracts raster values or statistics for selected vector features and r
 
 ## 📌 Overview
 
+<img src="screen.png" alt="QGIS image"></img>
+
 `VIIRS Query` is a QGIS Processing script that:
 
 - Retrieves available monthly timestamps from Ellipsis Drive
