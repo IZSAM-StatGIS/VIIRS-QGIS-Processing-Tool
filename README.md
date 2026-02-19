@@ -185,15 +185,12 @@ results aggregated
 
 ## 🚀 Installation
 
-1. Copy the script into:
-
-   ```
-   %APPDATA%/QGIS/QGIS3/profiles/default/processing/scripts/
-   ```
-
-2. Restart QGIS
-3. Open Processing Toolbox → **IZS Tools**
-4. Run **VIIRS query**
+1. Open QGIS
+2. Go to Settings → User Profiles → Open Active Profile Folder
+3. In the folder that opens, navigate to: processing > sripts
+4. Copy the file viirs_query_tool.py into this folder
+5. Open Processing Toolbox → **IZS Tools**
+6. Run **VIIRS query**
 
 ---
 
